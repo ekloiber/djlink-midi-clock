@@ -1,6 +1,6 @@
 # djlink-midi-clock
 
-Standalone box that joins a Pioneer/AlphaTheta **Pro DJ Link** network (XDJ-XZ first) and outputs **MIDI clock** locked to the tempo master, on 5-pin DIN (primary) and optionally USB-MIDI.
+Standalone box that joins a Pioneer/AlphaTheta **Pro DJ Link** network (XDJ-XZ first) and outputs **MIDI clock** locked to the tempo master, on 5-pin DIN (primary) and optionally USB-MIDI, plus a **bar-start pulse on a GPIO pin** (D7 / on-board LED by default).
 
 > Status: **draft / pre-hardware.** The clock engine and protocol parser pass host tests; the firmware has not yet run on hardware. Work through [docs/bringup.md](docs/bringup.md) before relying on it.
 
@@ -11,6 +11,7 @@ Standalone box that joins a Pioneer/AlphaTheta **Pro DJ Link** network (XDJ-XZ f
 | Adafruit Feather RP2350 with HSTX Port, 8 MB PSRAM (#6000) | MCU. Core 0: network. Core 1: clock + DIN. PSRAM/HSTX unused for now. |
 | Adafruit Ethernet FeatherWing (W5500) | Pro DJ Link over wired Ethernet. CS on pin 10. |
 | Adafruit MIDI FeatherWing kit | 5-pin DIN out (and in, unused) on Serial1 TX/RX. |
+| On-board red LED (D7) | Bar pulse: blinks on beat 1 of every bar. |
 
 Stack all three. The Ethernet wing uses SPI + D10; the MIDI wing uses TX/RX. No pin conflicts. Power via USB-C.
 
@@ -31,6 +32,7 @@ XDJ-XZ ──Ethernet──► W5500 ──SPI──► Core 0                  
   - Normal tracking: 30% of phase error per beat, ±3% max period change. With ±2 ms simulated network jitter, phase error stays ≤1.1 ms and clock-to-clock jitter stays ~0.04 ms.
   - Master change / relock / big error: fast regime (full correction within ~1 beat, ±50% period).
   - Start waits for beat 1 of the bar; Stop is sent when the master stops. Clock keeps running at the last tempo when stopped (configurable).
+- **Bar / beat pulses (GPIO):** the engine tracks which tick-0 is beat 1 using the beat-in-bar field (1–4) from beat packets. Core 1 raises the pin in the same loop iteration as that MIDI clock, so the pulse is phase-locked with the clock rather than raw network timing. Default: bar pulse on D7 (on-board LED), 50 ms, only while locked. An optional per-beat pulse is available on another pin. Accuracy depends on the track's rekordbox beatgrid downbeat, and the bar is assumed to be 4/4.
 - **USB-MIDI** gets the same bytes via a queue drained on core 0, so USB can never delay DIN.
 
 ## Build
@@ -64,6 +66,12 @@ All settings are in [include/config.h](include/config.h) and can be overridden w
 | `CLOCK_SEND_TRANSPORT` | 1 | Start/Stop follow master play state |
 | `CLOCK_START_ON_DOWNBEAT` | 1 | Hold Start until beat 1 |
 | `VCDJ_DEVICE_NUMBER` | 0 | 0 = auto in `VCDJ_MIN..VCDJ_MAX` |
+| `BAR_PULSE_PIN` | 7 | Bar-start pulse pin (D7 = on-board LED); -1 = off |
+| `BEAT_PULSE_PIN` | -1 | Optional every-beat pulse pin |
+| `PULSE_WIDTH_MS` | 50 | ~10 ms is typical for triggers |
+| `PULSE_ACTIVE_HIGH` | 1 | Set 0 for active-low outputs |
+| `PULSE_WHEN_UNLOCKED` | 0 | 1 = keep pulsing while free-running |
+| `STATUS_LED_PIN` | -1 | Optional raw "beat received" LED on core 0 |
 | `USE_DHCP` / `STATIC_IP` | 1 / 169.254.77.77 | DHCP first, link-local fallback |
 
 ## Layout
@@ -83,7 +91,8 @@ docs/bringup.md              hardware bring-up checklist
 ## Known gaps / roadmap
 
 - Packet offsets for CDJ status, mixer status and keep-alive need confirming against an XDJ-XZ capture. See [docs/protocol.md](docs/protocol.md).
-- No Song Position Pointer. Bar alignment relies on Start at the downbeat.
+- No Song Position Pointer. Bar alignment for MIDI gear relies on Start at the downbeat. The GPIO bar pulse gives an explicit bar marker.
+- GPIO is 3.3 V. 5 V or Eurorack trigger outputs need a transistor or level-shifter stage.
 - No status display. HSTX or an I2C OLED on STEMMA QT would fit. The onboard NeoPixel is unused.
 - No runtime config (web UI / SysEx). Everything is compile-time.
 - DIN MIDI-in on the FeatherWing is unused (could take a tap-tempo or external transport).

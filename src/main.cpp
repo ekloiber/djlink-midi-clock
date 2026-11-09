@@ -71,8 +71,10 @@ static void handlePacket(const uint8_t* buf, size_t len, uint16_t port, uint64_t
         ev.bpm = float(b.bpm());
         ev.tUs = now;
         pushEvent(ev);
+#if STATUS_LED_PIN >= 0
         digitalWrite(STATUS_LED_PIN, HIGH);
         g_ledOffAt = millis() + (b.beatInBar == 1 ? 120 : 30);
+#endif
       }
       return;
     }
@@ -176,8 +178,10 @@ static void printStatus() {
 }
 
 void setup() {
+#if STATUS_LED_PIN >= 0
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
+#endif
 
   queue_init(&g_events, sizeof(ClockEvent), 64);
 #if ENABLE_USB_MIDI
@@ -197,10 +201,13 @@ void setup() {
   makeMac(g_mac);
 
   if (!net.begin(g_mac)) {
-    // No W5500 found: fast blink forever. Clock still free-runs on core 1.
+    // No W5500 found. Report forever; core 1 keeps running.
     for (;;) {
+      Serial.println("ERROR: W5500 not found (check Ethernet FeatherWing / CS pin)");
+#if STATUS_LED_PIN >= 0
       digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
-      delay(100);
+#endif
+      delay(500);
     }
   }
 
@@ -232,10 +239,12 @@ void loop() {
     if (net.usingDhcp()) Ethernet.maintain();
     printStatus();
   }
+#if STATUS_LED_PIN >= 0
   if (g_ledOffAt && int32_t(ms - g_ledOffAt) >= 0) {
     digitalWrite(STATUS_LED_PIN, LOW);
     g_ledOffAt = 0;
   }
+#endif
 
 #if ENABLE_USB_MIDI
 #ifdef TINYUSB_NEED_POLLING_TASK
@@ -249,9 +258,39 @@ void loop() {
 // ===================================================================== core 1
 static midiclock::ClockEngine engine;
 
+// GPIO pulse on core 1. Rising edge is written in the same loop iteration as
+// the MIDI clock byte it belongs to.
+class PulseOut {
+ public:
+  explicit PulseOut(int pin) : pin_(pin) {}
+  void begin() {
+    if (pin_ < 0) return;
+    pinMode(pin_, OUTPUT);
+    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? LOW : HIGH);
+  }
+  void fire(uint64_t nowUs) {
+    if (pin_ < 0) return;
+    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? HIGH : LOW);
+    offAtUs_ = nowUs + uint64_t(PULSE_WIDTH_MS) * 1000;
+  }
+  void service(uint64_t nowUs) {
+    if (pin_ < 0 || !offAtUs_ || nowUs < offAtUs_) return;
+    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? LOW : HIGH);
+    offAtUs_ = 0;
+  }
+ private:
+  int pin_;
+  uint64_t offAtUs_ = 0;
+};
+
+static PulseOut barPulse(BAR_PULSE_PIN);
+static PulseOut beatPulse(BEAT_PULSE_PIN);
+
 void setup1() {
   while (!g_ready) tight_loop_contents();
   Serial1.begin(MIDI_DIN_BAUD);  // MIDI FeatherWing on TX/RX
+  barPulse.begin();
+  beatPulse.begin();
 
   midiclock::ClockConfig cfg;
   cfg.offsetUs = CLOCK_OFFSET_US;
@@ -287,13 +326,22 @@ void loop1() {
   }
 
   uint8_t out[4];
-  size_t n = engine.poll(int64_t(time_us_64()), out, sizeof(out));
+  uint8_t events = 0;
+  const uint64_t now = time_us_64();
+  size_t n = engine.poll(int64_t(now), out, sizeof(out), &events);
   if (n) {
     Serial1.write(out, n);  // DIN first; real-time bytes leave immediately
+    if (events && (engine.locked() || PULSE_WHEN_UNLOCKED)) {
+      if (events & midiclock::kEventBar) barPulse.fire(now);
+      if (events & midiclock::kEventBeat) beatPulse.fire(now);
+    }
 #if ENABLE_USB_MIDI
     for (size_t i = 0; i < n; ++i) queue_try_add(&g_usbBytes, &out[i]);
 #endif
   }
+
+  barPulse.service(now);
+  beatPulse.service(now);
 
   static uint64_t nextPublish = 0;
   uint64_t t = time_us_64();

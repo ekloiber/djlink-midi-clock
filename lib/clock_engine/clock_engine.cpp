@@ -6,9 +6,12 @@ namespace midiclock {
 
 namespace {
 double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// Wrap any integer onto 1..kBeatsPerBar.
+int wrapBar(int x) { return ((x - 1) % kBeatsPerBar + kBeatsPerBar) % kBeatsPerBar + 1; }
+bool validBar(uint8_t b) { return b >= 1 && b <= kBeatsPerBar; }
 }  // namespace
 
-void ClockEngine::startStream(double atUs) {
+void ClockEngine::startStream(double atUs, uint8_t beatInBar) {
   // Never put two clocks closer than half a tick (e.g. a free-running clock
   // that fired just before the downbeat Start).
   if (haveTicked_ && atUs < lastTickUs_ + 0.5 * nominalUs_) atUs = lastTickUs_ + 0.5 * nominalUs_;
@@ -16,6 +19,7 @@ void ClockEngine::startStream(double atUs) {
   tick_ = 0;
   periodUs_ = nominalUs_;
   correctionTicks_ = 0;
+  nextBar_ = validBar(beatInBar) ? beatInBar : 0;
   ticking_ = true;
   locked_ = true;
 }
@@ -34,31 +38,40 @@ void ClockEngine::onBeat(int64_t rxUs, double bpm, uint8_t beatInBar) {
     startArmed_ = false;
     startPending_ = true;
     resyncPending_ = true;  // Start may be nudged late; snap fully on next beat
-    startStream(atOrNow);
+    startStream(atOrNow, beatInBar);
     return;
   }
 
   if (!ticking_) {
-    startStream(atOrNow);
+    startStream(atOrNow, beatInBar);
     resyncPending_ = false;
     return;
   }
 
-  // R = intervals between the next scheduled clock and our next tick 0.
-  // If the next clock IS tick 0 it is already committed; steer the one after.
+  // R = intervals between the next scheduled clock and the tick 0 we steer.
+  // If our next tick 0 is less than half a beat away there is too little room
+  // to correct it smoothly (and if it is the very next clock it is already
+  // committed), so steer the tick 0 after it instead.
   int R = (kPpqn - tick_) % kPpqn;
   const int corrected = correctionTicks_ < R ? correctionTicks_ : R;
   double nextB0 = nextTickUs_ + corrected * periodUs_ + (R - corrected) * nominalUs_;
-  if (R == 0) {
-    R = kPpqn;
+  int skipped = 0;  // tick-0s between now and the one we steer
+  if (R < kPpqn / 2) {
+    R += kPpqn;
     nextB0 += kPpqn * nominalUs_;
+    skipped = 1;
   }
 
   // Compare against the nearest point on the beat grid implied by this beat.
   const double beatUs = nominalUs_ * kPpqn;
-  const double grid = target + round((nextB0 - target) / beatUs) * beatUs;
+  const double beatsAhead = round((nextB0 - target) / beatUs);
+  const double grid = target + beatsAhead * beatUs;
   const double err = nextB0 - grid;  // > 0: our tick 0 would land late
   lastErrUs_ = err;
+
+  // Bar position of the next tick 0 we will emit. The steered tick 0 sits
+  // `beatsAhead` beats after this beat; the next one emitted may be one earlier.
+  if (validBar(beatInBar)) nextBar_ = wrapBar(beatInBar + int(beatsAhead) - skipped);
 
   const bool fast = resyncPending_ || !locked_ ||
                     fabs(err) > cfg_.resyncThresholdBeats * beatUs;
@@ -89,8 +102,9 @@ void ClockEngine::onTransport(bool playing, int64_t nowUs) {
   }
 }
 
-size_t ClockEngine::poll(int64_t nowUs, uint8_t* out, size_t cap) {
+size_t ClockEngine::poll(int64_t nowUs, uint8_t* out, size_t cap, uint8_t* events) {
   size_t n = 0;
+  if (events) *events = 0;
   if (stopPending_ && n < cap) {
     out[n++] = kMidiStop;
     stopPending_ = false;
@@ -109,6 +123,12 @@ size_t ClockEngine::poll(int64_t nowUs, uint8_t* out, size_t cap) {
       running_ = true;
     }
     out[n++] = kMidiClock;
+    if (tick_ == 0) {
+      uint8_t ev = kEventBeat;
+      if (nextBar_ == 1) ev |= kEventBar;
+      if (nextBar_) nextBar_ = nextBar_ % kBeatsPerBar + 1;
+      if (events) *events = ev;
+    }
     lastTickUs_ = nextTickUs_;
     haveTicked_ = true;
     tick_ = (tick_ + 1) % kPpqn;

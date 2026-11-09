@@ -19,7 +19,7 @@ static int g_fail = 0, g_pass = 0;
   } while (0)
 
 // ------------------------------------------------------------ simulation rig
-struct Tick { int64_t t; int index; };  // index = clocks since last Start (or stream start)
+struct Tick { int64_t t; int index; uint8_t ev; };  // index = clocks since last Start (or stream start)
 
 struct Sim {
   ClockEngine eng;
@@ -38,11 +38,12 @@ struct Sim {
       if (d > until) { t = until; return; }
       t = d;
       uint8_t out[4];
-      size_t n = eng.poll(t, out, sizeof(out));
+      uint8_t ev = 0;
+      size_t n = eng.poll(t, out, sizeof(out), &ev);
       for (size_t i = 0; i < n; ++i) {
         if (out[i] == kMidiStart) { starts.push_back(t); startTickPos.push_back(ticks.size()); index = 0; }
         else if (out[i] == kMidiStop) stops.push_back(t);
-        else if (out[i] == kMidiClock) ticks.push_back({t, index++});
+        else if (out[i] == kMidiClock) ticks.push_back({t, index++, ev});
       }
       if (n == 0 && eng.nextDeadline() <= t) ++t;
     }
@@ -191,6 +192,7 @@ static void testStartOnDownbeat() {
     CHECK(s.eng.running());
     const Tick& first = s.ticks[s.startTickPos[0]];
     CHECK(first.index == 0 && first.t == s.starts[0]);
+    CHECK(first.ev == (kEventBeat | kEventBar));
     // No clock pair closer than half a tick around the Start.
     CHECK(first.t - s.ticks[s.startTickPos[0] - 1].t >= 10416);
     // Locked to the beat grid again within a few beats.
@@ -241,6 +243,86 @@ static void testRelockAfterDropout() {
   std::vector<int64_t> after(beats.begin() + 10, beats.end());
   CHECK(maxPhaseErr(s, after, after[3]) < 2000);
   for (size_t i = 1; i < s.ticks.size(); ++i) CHECK(s.ticks[i].index == s.ticks[i - 1].index + 1);
+}
+
+
+// Bar events: every bib==1 beat (after `from`) has exactly one bar event within
+// tolUs, and no bar event is far from a bib==1 beat.
+static bool barsAligned(const Sim& s, const std::vector<int64_t>& beats,
+                        const std::vector<uint8_t>& bibs, int64_t from, int64_t tolUs) {
+  bool ok = true;
+  for (size_t i = 0; i < beats.size(); ++i) {
+    if (beats[i] < from || bibs[i] != 1) continue;
+    if (beats[i] > s.ticks.back().t - 100000) continue;  // past end of run
+    int hits = 0;
+    for (const auto& tk : s.ticks)
+      if ((tk.ev & kEventBar) && llabs(tk.t - beats[i]) <= tolUs) ++hits;
+    if (hits != 1) { printf("    downbeat %zu: %d bar events\n", i, hits); ok = false; }
+  }
+  for (const auto& tk : s.ticks) {
+    if (!(tk.ev & kEventBar) || tk.t < from) continue;
+    bool near = false;
+    for (size_t i = 0; i < beats.size(); ++i)
+      if (bibs[i] == 1 && llabs(tk.t - beats[i]) <= tolUs) near = true;
+    if (!near) { printf("    stray bar event at %lld\n", (long long)tk.t); ok = false; }
+  }
+  return ok;
+}
+
+static void testBarEvents() {
+  printf("bar events follow beat-in-bar under jitter\n");
+  Sim s;
+  Lcg rng;
+  std::vector<int64_t> beats;
+  std::vector<uint8_t> bibs;
+  for (int k = 0; k < 120; ++k) {
+    int64_t b = 1000000 + int64_t(k) * 500000;
+    uint8_t bib = uint8_t((k + 1) % 4 + 1);  // starts mid-bar: 2,3,4,1,...
+    beats.push_back(b);
+    bibs.push_back(bib);
+    s.beat(b + int64_t(rng.uniform(-2000, 2000)), 120.0, bib);
+  }
+  s.runUntil(beats.back() + 400000);
+  CHECK(barsAligned(s, beats, bibs, beats[2], 2500));
+  int beatEvents = 0;
+  for (const auto& tk : s.ticks) beatEvents += (tk.ev & kEventBeat) ? 1 : 0;
+  CHECK(beatEvents >= 120 && beatEvents <= 121);
+}
+
+static void testBarEventsAfterMasterSwitch() {
+  printf("bar events realign after master switch (phase + bar offset)\n");
+  Sim s;
+  std::vector<int64_t> beats;
+  std::vector<uint8_t> bibs;
+  int64_t b = 1000000;
+  for (int k = 0; k < 60; ++k) {
+    uint8_t bib;
+    if (k < 30) bib = uint8_t(k % 4 + 1);
+    else {
+      if (k == 30) { b += 300000; s.eng.requestResync(); }  // 0.6 beat later
+      bib = uint8_t((k + 2) % 4 + 1);                       // and bars shifted by 2
+    }
+    beats.push_back(b);
+    bibs.push_back(bib);
+    s.beat(b, 120.0, bib);
+    b += 500000;
+  }
+  s.runUntil(beats.back() + 400000);
+  CHECK(barsAligned(s, beats, bibs, beats[33], 2000));
+  int preBars = 0;
+  for (const auto& tk : s.ticks) if ((tk.ev & kEventBar) && tk.t < beats[29] + 100) ++preBars;
+  CHECK(preBars == 8);  // downbeats at k = 0,4,...,28
+}
+
+static void testNoBarWithoutBeatInBar() {
+  printf("no bar events when beat-in-bar is unknown\n");
+  Sim s;
+  for (int k = 0; k < 20; ++k) s.beat(1000000 + int64_t(k) * 500000, 120.0, 0);
+  s.runUntil(11000000);
+  int bars = 0, beatsEv = 0;
+  for (const auto& tk : s.ticks) { bars += (tk.ev & kEventBar) ? 1 : 0; beatsEv += (tk.ev & kEventBeat) ? 1 : 0; }
+  CHECK(bars == 0);
+  CHECK(beatsEv > 15);
 }
 
 // ------------------------------------------------------------ protocol tests
@@ -347,6 +429,9 @@ int main() {
   testStartOnDownbeat();
   testStopAndFreewheel();
   testRelockAfterDropout();
+  testBarEvents();
+  testBarEventsAfterMasterSwitch();
+  testNoBarWithoutBeatInBar();
   testParseBeat();
   testParseStatus();
   testKeepAliveRoundTrip();

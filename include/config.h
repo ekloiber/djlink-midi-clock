@@ -85,6 +85,38 @@
 #ifndef DEBUG_SERIAL
 #define DEBUG_SERIAL 1               // status line once per second over USB serial
 #endif
+// Activity LED on core 0: flashes when a beat arrives from the master (raw,
+// unsmoothed). -1 = off. Off by default because D7 (the on-board LED) is used
+// for the bar pulse below.
 #ifndef STATUS_LED_PIN
-#define STATUS_LED_PIN LED_BUILTIN   // red LED (GPIO 7) on Feather RP2350
+#define STATUS_LED_PIN -1
+#endif
+
+// ---------- GPIO pulse outputs (driven by core 1, phase-locked to the clock) ----------
+// Each pulse starts on the same instant as the MIDI clock that begins the
+// beat/bar, so it carries the PLL's accuracy rather than raw network jitter.
+// Pins are Arduino pin numbers; -1 disables. 3.3 V logic: use a transistor or
+// level shifter for 5 V / Eurorack triggers.
+#ifndef BAR_PULSE_PIN
+#define BAR_PULSE_PIN 7              // D7 = on-board red LED on Feather RP2350
+#endif
+#ifndef BEAT_PULSE_PIN
+#define BEAT_PULSE_PIN -1            // every beat; e.g. 5 or 6 if wanted
+#endif
+#ifndef PULSE_WIDTH_MS
+#define PULSE_WIDTH_MS 50            // long enough to see on an LED; ~10 for triggers
+#endif
+#ifndef PULSE_ACTIVE_HIGH
+#define PULSE_ACTIVE_HIGH 1
+#endif
+#ifndef PULSE_WHEN_UNLOCKED
+#define PULSE_WHEN_UNLOCKED 0        // 1 = keep pulsing while free-running
+#endif
+
+#if (BAR_PULSE_PIN >= 0 && (BAR_PULSE_PIN == STATUS_LED_PIN || BAR_PULSE_PIN == BEAT_PULSE_PIN)) || \
+    (BEAT_PULSE_PIN >= 0 && BEAT_PULSE_PIN == STATUS_LED_PIN)
+#error "BAR_PULSE_PIN, BEAT_PULSE_PIN and STATUS_LED_PIN must be different pins"
+#endif
+#if BAR_PULSE_PIN == ETH_CS_PIN || BEAT_PULSE_PIN == ETH_CS_PIN || STATUS_LED_PIN == ETH_CS_PIN
+#error "Pulse/LED pin collides with the Ethernet FeatherWing CS pin"
 #endif

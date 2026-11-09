@@ -25,6 +25,11 @@ Do these in order. Each step isolates one layer.
 - [ ] Have a DAW sync to the clock and compare its BPM with the XDJ display at several pitch settings.
 - [ ] Measure audio-vs-clock offset by recording XDJ output and a click from the DAW. Trim with `CLOCK_OFFSET_US`.
 
+## 4b. Bar pulse
+- [ ] With a correctly gridded track playing, the on-board LED (D7) blinks on beat 1 only, in time with the XDJ's beat counter.
+- [ ] Switch masters to a deck at a different bar position. The LED should re-sync to the new deck's beat 1 within about 1–2 beats.
+- [ ] If you move it to an external pin, scope the pulse against a DIN clock decode. The rising edge should coincide with the 0xF8 that starts the bar.
+
 ## 5. Edge cases
 - [ ] Switch master between decks mid-track. The clock should realign within about 1–2 beats with no Start/Stop.
 - [ ] Pull the Ethernet cable. The clock should free-run, then relock when it's reconnected.
