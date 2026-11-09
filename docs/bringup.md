@@ -1,0 +1,35 @@
+# Bring-up checklist
+
+Do these in order. Each step isolates one layer.
+
+## 0. Toolchain
+- [ ] `pio boards rp2350`: confirm the board ID for the Feather RP2350 HSTX and fix `board =` in `platformio.ini` if it differs from `adafruit_feather_rp2350_hstx`.
+- [ ] `make -C tests/host` passes.
+- [ ] `pio run` builds both envs. The firmware has only been syntax-checked against stubs, so expect small API fixes. Likely spots are the TinyUSB setup and the `Ethernet.begin` overloads.
+
+## 1. SPI / W5500
+- [ ] Confirm that `SPI` in Arduino-Pico maps to the Feather's SCK/MO/MI header pins on this board. If it doesn't, set the pins with `SPI.setSCK/setTX/setRX` before `net.begin()`.
+- [ ] Serial shows an IP. A fast-blinking LED means no W5500 was found.
+
+## 2. Passive receive (no XDJ involvement needed beyond playing)
+- [ ] Temporarily set `-DANNOUNCE_AS_PLAYER=0`.
+- [ ] Play a track. The status line should show `master=N` and the BPM, and the LED should flash on beats with a long flash on beat 1.
+
+## 3. Virtual player
+- [ ] Re-enable announce. The XDJ-XZ link screen should list `midi-clock`.
+- [ ] Status packets arrive: `play=` follows the play button, and pressing MASTER on the other deck changes `master=`.
+- [ ] Capture with Wireshark through a mirrored switch port or a laptop on the same switch. Check every ⚠️ offset in `protocol.md`.
+
+## 4. Clock on DIN
+- [ ] Connect DIN out to a MIDI interface. In a MIDI monitor, confirm 0xF8 at 24 PPQN, Start on beat 1, and Stop on pause.
+- [ ] Have a DAW sync to the clock and compare its BPM with the XDJ display at several pitch settings.
+- [ ] Measure audio-vs-clock offset by recording XDJ output and a click from the DAW. Trim with `CLOCK_OFFSET_US`.
+
+## 5. Edge cases
+- [ ] Switch master between decks mid-track. The clock should realign within about 1–2 beats with no Start/Stop.
+- [ ] Pull the Ethernet cable. The clock should free-run, then relock when it's reconnected.
+- [ ] Track loops, hot cues, and reverse play. Watch for spurious Stop/Start.
+- [ ] Power-cycle the XDJ while the box is running.
+
+## 6. USB-MIDI (optional)
+- [ ] Flash `feather_rp2350_usbmidi`. The device should enumerate as MIDI and as serial, and the DIN timing from step 4 should be unchanged.

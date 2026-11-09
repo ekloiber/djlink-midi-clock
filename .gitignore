@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+tests/host/run_tests
+*.o
