@@ -192,7 +192,7 @@ static void testStartOnDownbeat() {
     CHECK(s.eng.running());
     const Tick& first = s.ticks[s.startTickPos[0]];
     CHECK(first.index == 0 && first.t == s.starts[0]);
-    CHECK(first.ev == (kEventBeat | kEventBar));
+    CHECK(first.ev == (kEventTick | kEventStart | kEventBeat | kEventBar));
     // No clock pair closer than half a tick around the Start.
     CHECK(first.t - s.ticks[s.startTickPos[0] - 1].t >= 10416);
     // Locked to the beat grid again within a few beats.
@@ -325,6 +325,96 @@ static void testNoBarWithoutBeatInBar() {
   CHECK(beatsEv > 15);
 }
 
+
+static void testResyncHold() {
+  printf("resync hold: run low + clocks stop, restart on next downbeat\n");
+  Sim s;
+  std::vector<int64_t> beats;
+  std::vector<uint8_t> bibs;
+  s.eng.onTransport(true, 0);
+  int64_t holdAt = 0, releaseAt = 0;
+  for (int k = 0; k < 40; ++k) {
+    int64_t b = 1000000 + int64_t(k) * 500000;
+    uint8_t bib = uint8_t(k % 4 + 1);
+    beats.push_back(b);
+    bibs.push_back(bib);
+    if (k == 13) { holdAt = b - 250000; s.runUntil(holdAt); s.eng.setHold(true, holdAt); }
+    if (k == 18) { releaseAt = b - 250000; s.runUntil(releaseAt); s.eng.setHold(false, releaseAt); }
+    s.beat(b, 120.0, bib);
+  }
+  s.runUntil(beats.back() + 400000);
+  CHECK(s.stops.size() == 1 && s.stops[0] == holdAt);
+  CHECK(s.starts.size() == 2);
+  // No clocks while held, and none after release until the restart.
+  int during = 0;
+  // (a clock due exactly at holdAt was emitted before the hold took effect)
+  for (const auto& tk : s.ticks) if (tk.t > holdAt && tk.t < s.starts.back()) ++during;
+  CHECK(during == 0);
+  // Released mid-bar (before beat 18, bib 3) -> restart at beat 20 (bib 1).
+  if (s.starts.size() == 2) {
+    CHECK(llabs(s.starts[1] - beats[20]) < 100);
+    const Tick& first = s.ticks[s.startTickPos[1]];
+    CHECK(first.index == 0 && (first.ev & kEventStart) && (first.ev & kEventBar));
+  }
+  CHECK(s.eng.running());
+  CHECK(maxPhaseErr(s, beats, beats[21]) < 2000);
+}
+
+static void testHoldWhileStoppedThenPlay() {
+  printf("hold released while stopped: no Start until play + downbeat\n");
+  Sim s;
+  for (int k = 0; k < 4; ++k) s.beat(1000000 + int64_t(k) * 500000, 120.0, uint8_t(k % 4 + 1));
+  s.eng.setHold(true, 3000000);
+  s.runUntil(3200000);
+  s.eng.setHold(false, 3200000);
+  s.runUntil(3400000);
+  CHECK(s.starts.empty() && !s.eng.running());
+  s.eng.onTransport(true, 3400000);
+  for (int k = 0; k < 8; ++k)
+    s.beat(3500000 + int64_t(k) * 500000, 120.0, uint8_t((k + 2) % 4 + 1));  // 3,4,1,...
+  s.runUntil(8000000);
+  CHECK(s.starts.size() == 1);
+  if (!s.starts.empty()) CHECK(llabs(s.starts[0] - 4500000) <= 10500);  // k=2 is bib 1
+}
+
+static void testRunStateWithoutMidiTransport() {
+  printf("run gate tracked even with MIDI Start/Stop disabled\n");
+  ClockConfig c;
+  c.sendTransport = false;
+  Sim s(c);
+  s.eng.onTransport(true, 0);
+  for (int k = 0; k < 6; ++k) s.beat(1000000 + int64_t(k) * 500000, 120.0, uint8_t(k % 4 + 1));
+  s.runUntil(3700000);
+  CHECK(s.eng.running());
+  s.eng.onTransport(false, 3700000);
+  s.runUntil(4000000);
+  CHECK(!s.eng.running());
+  CHECK(s.starts.empty() && s.stops.empty());  // no MIDI bytes
+  bool sawStartEvent = false;
+  for (const auto& tk : s.ticks) sawStartEvent |= (tk.ev & kEventStart) != 0;
+  CHECK(sawStartEvent);
+}
+
+static void testTickEvents() {
+  printf("tick event on every clock\n");
+  Sim s;
+  for (int k = 0; k < 10; ++k) s.beat(1000000 + int64_t(k) * 500000, 120.0, 1);
+  s.runUntil(6000000);
+  bool all = true;
+  for (const auto& tk : s.ticks) all &= (tk.ev & kEventTick) != 0;
+  CHECK(all && s.ticks.size() > 200);
+}
+
+static void testListenOnlyStopInference() {
+  printf("listen-only: stop inferred after ~1.5 missed beats\n");
+  prolink::DeviceTable t;
+  prolink::BeatPacket b{};
+  b.device = 1; b.bpmX100 = 12000; b.pitchRaw = 0x100000;
+  t.onBeat(b, 1000000);
+  CHECK(t.isPlaying(1, 1000000 + 700000));   // < 750 ms
+  CHECK(!t.isPlaying(1, 1000000 + 800000));  // > 1.5 beats at 120 BPM
+}
+
 // ------------------------------------------------------------ protocol tests
 static void put16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
 static void put24(uint8_t* p, uint32_t v) { p[0] = v >> 16; p[1] = v >> 8; p[2] = v; }
@@ -432,6 +522,11 @@ int main() {
   testBarEvents();
   testBarEventsAfterMasterSwitch();
   testNoBarWithoutBeatInBar();
+  testResyncHold();
+  testHoldWhileStoppedThenPlay();
+  testRunStateWithoutMidiTransport();
+  testTickEvents();
+  testListenOnlyStopInference();
   testParseBeat();
   testParseStatus();
   testKeepAliveRoundTrip();

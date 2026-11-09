@@ -30,6 +30,14 @@ Do these in order. Each step isolates one layer.
 - [ ] Switch masters to a deck at a different bar position. The LED should re-sync to the new deck's beat 1 within about 1–2 beats.
 - [ ] If you move it to an external pin, scope the pulse against a DIN clock decode. The rising edge should coincide with the 0xF8 that starts the bar.
 
+## 4c. Eurorack I/O (scope or logic analyser first, then buffered jacks)
+- [ ] D5 shows 24 pulses per beat at 50% duty, edge-aligned with the DIN 0xF8 bytes.
+- [ ] D6 Run rises on the first downbeat after play, before the first D5 edge of that bar, and falls on stop.
+- [ ] D9 x1 pulses on every beat; Bar (D13/LED) on beat 1 only.
+- [ ] Resync on D11 (short to GND): Run drops and D5/D9/Bar stop immediately. After release, everything restarts on the next bar downbeat. Repeat with `RESYNC_MODE=1`.
+- [ ] Selector (A0–A3, D24 to GND one at a time): the serial log prints the new follow target, and the clock follows that deck's tempo/transport. Also confirm which player numbers the XDJ-XZ's decks use.
+- [ ] Clock a Eurorack sequencer from x24 + Run and confirm it stays bar-aligned across stop/start and resync.
+
 ## 5. Edge cases
 - [ ] Switch master between decks mid-track. The clock should realign within about 1–2 beats with no Start/Stop.
 - [ ] Pull the Ethernet cable. The clock should free-run, then relock when it's reconnected.

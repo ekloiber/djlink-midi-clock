@@ -21,9 +21,11 @@ constexpr uint8_t kMidiStop  = 0xFC;
 constexpr int     kPpqn      = 24;
 constexpr int     kBeatsPerBar = 4;  // DJ Link beat-in-bar is always 1..4
 
-// Bits reported by poll() alongside the clock that starts a beat / bar.
-constexpr uint8_t kEventBeat = 0x01;  // this clock is tick 0 of a beat
-constexpr uint8_t kEventBar  = 0x02;  // ...and that beat is beat 1 of the bar
+// Bits reported by poll() for the clock it just emitted.
+constexpr uint8_t kEventBeat  = 0x01;  // this clock is tick 0 of a beat
+constexpr uint8_t kEventBar   = 0x02;  // ...and that beat is beat 1 of the bar
+constexpr uint8_t kEventTick  = 0x04;  // a clock was emitted (every 1/24 beat)
+constexpr uint8_t kEventStart = 0x08;  // run just started (Start precedes this clock)
 
 struct ClockConfig {
   int64_t offsetUs = 0;               // + delays clock vs. received beat, - advances it
@@ -34,7 +36,7 @@ struct ClockConfig {
   double  resyncMaxSlew = 0.5;
   int64_t loseLockUs = 2000000;       // no beats for this long -> unlocked
   bool    runWhenStopped = true;      // keep sending clock when not locked/playing
-  bool    sendTransport = true;       // send Start/Stop
+  bool    sendTransport = true;       // emit MIDI Start/Stop bytes (run state is tracked regardless)
   bool    startOnDownbeat = true;     // delay Start until beat 1 of a bar
 };
 
@@ -49,6 +51,14 @@ class ClockEngine {
 
   // Followed device started/stopped playing.
   void onTransport(bool playing, int64_t nowUs);
+
+  // Resync hold. While held: run goes low (MIDI Stop sent), and no clocks or
+  // beat/bar events are emitted, though the engine stays phase-locked
+  // internally. On release, if the source is playing, outputs stay silent and
+  // run restarts on the next downbeat (or next beat if startOnDownbeat is
+  // false); if it is stopped, the free-running clock simply resumes.
+  void setHold(bool hold, int64_t nowUs);
+  bool held() const { return hold_; }
 
   // Followed device changed (e.g. new tempo master): realign on next beat
   // using the fast regime.
@@ -65,7 +75,8 @@ class ClockEngine {
 
   bool    ticking() const { return ticking_; }
   bool    locked() const { return locked_; }
-  bool    running() const { return running_; }  // between Start and Stop
+  bool    running() const { return running_; }  // run gate: between Start and Stop
+  double  nominalTickUs() const { return nominalUs_; }
   double  bpm() const { return bpm_; }
   double  lastPhaseErrorUs() const { return lastErrUs_; }
   int     tickInBeat() const { return tick_; }
@@ -73,6 +84,7 @@ class ClockEngine {
 
  private:
   void startStream(double atUs, uint8_t beatInBar);
+  void stopRunning();
 
   ClockConfig cfg_;
   bool   ticking_ = false;
@@ -84,6 +96,8 @@ class ClockEngine {
   bool   stopPending_ = false;
   bool   resyncPending_ = false;
   bool   haveTicked_ = false;
+  bool   hold_ = false;
+  bool   awaitRestart_ = false;  // hold released; silent until restart Start
 
   double bpm_ = 0.0;
   double nominalUs_ = 0.0;   // 60e6 / (bpm * 24)

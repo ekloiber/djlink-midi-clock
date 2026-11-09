@@ -20,6 +20,7 @@
 #include "clock_engine.h"
 #include "device_table.h"
 #include "events.h"
+#include "io.h"
 #include "net.h"
 #include "prolink_packets.h"
 
@@ -38,6 +39,7 @@ static prolink::DeviceTable devices;
 static uint8_t g_mac[6];
 static uint8_t g_self = 0;
 static uint8_t g_master = 0;
+static uint8_t g_follow = FOLLOW_DEVICE;  // 0 = tempo master, 1..4 = fixed deck
 static bool g_masterPlaying = false;
 static uint32_t g_ledOffAt = 0;
 #if ENABLE_USB_MIDI
@@ -62,7 +64,7 @@ static void handlePacket(const uint8_t* buf, size_t len, uint16_t port, uint64_t
       prolink::BeatPacket b;
       if (port != prolink::kPortBeat || !prolink::parseBeat(buf, len, b)) return;
       devices.onBeat(b, now);
-      uint8_t master = devices.selectMaster(now, FOLLOW_DEVICE);
+      uint8_t master = devices.selectMaster(now, g_follow);
       if (master && b.device == master && b.bpm() > 0) {
         ClockEvent ev{};
         ev.type = kEvBeat;
@@ -123,7 +125,7 @@ static void sendKeepAlive() {
 }
 
 static void updateMasterAndTransport(int64_t now) {
-  uint8_t m = devices.selectMaster(now, FOLLOW_DEVICE);
+  uint8_t m = devices.selectMaster(now, g_follow);
   if (m != g_master) {
     if (m && g_master) {
       ClockEvent ev{};
@@ -146,6 +148,37 @@ static void updateMasterAndTransport(int64_t now) {
   }
 }
 
+// ---- 5-position deck selector -------------------------------------------
+static DebouncedIn selectIn[5] = {
+    {SELECT_PIN_MASTER, SELECT_ACTIVE_LOW, SELECT_DEBOUNCE_MS * 1000u},
+    {SELECT_PIN_DECK1, SELECT_ACTIVE_LOW, SELECT_DEBOUNCE_MS * 1000u},
+    {SELECT_PIN_DECK2, SELECT_ACTIVE_LOW, SELECT_DEBOUNCE_MS * 1000u},
+    {SELECT_PIN_DECK3, SELECT_ACTIVE_LOW, SELECT_DEBOUNCE_MS * 1000u},
+    {SELECT_PIN_DECK4, SELECT_ACTIVE_LOW, SELECT_DEBOUNCE_MS * 1000u},
+};
+
+// Index 0 = master, 1..4 = deck. Exactly one active position wins; none
+// active (no switch fitted) falls back to FOLLOW_DEVICE; several active
+// (mid-rotation / wiring fault) keeps the previous choice.
+static void serviceSelector(uint64_t nowUs) {
+  bool any = false;
+  for (auto& in : selectIn) { in.update(nowUs); any |= in.enabled(); }
+  if (!any) return;
+  int active = -1, count = 0;
+  for (int i = 0; i < 5; ++i)
+    if (selectIn[i].active()) { active = i; ++count; }
+  uint8_t follow = g_follow;
+  if (count == 1) follow = uint8_t(active);  // 0 = master, 1..4 = deck
+  else if (count == 0) follow = FOLLOW_DEVICE;
+  if (follow != g_follow) {
+    g_follow = follow;
+#if DEBUG_SERIAL
+    if (follow) Serial.printf("selector: follow deck %u\n", follow);
+    else Serial.printf("selector: follow tempo master\n");
+#endif
+  }
+}
+
 static bool readStatus(ClockStatus& out) {
   for (int tries = 0; tries < 4; ++tries) {
     uint32_t s1 = g_status.seq;
@@ -156,6 +189,7 @@ static bool readStatus(ClockStatus& out) {
     out.locked = g_status.locked;
     out.running = g_status.running;
     out.ticking = g_status.ticking;
+    out.held = g_status.held;
     __dmb();
     if (g_status.seq == s1) return true;
   }
@@ -168,12 +202,12 @@ static void printStatus() {
   readStatus(cs);
   const auto& md = devices.get(g_master);
   IPAddress ip = net.localIP();
-  Serial.printf("[%s] ip=%u.%u.%u.%u self=%u devs=%d master=%u(%s) play=%d | clock %.2f bpm "
-                "lock=%d run=%d err=%.2fms drop=%lu\n",
+  Serial.printf("[%s] ip=%u.%u.%u.%u self=%u devs=%d follow=%s%u src=%u(%s) play=%d | "
+                "clock %.2f bpm lock=%d run=%d hold=%d err=%.2fms drop=%lu\n",
                 net.linkUp() ? "link" : "NO LINK", ip[0], ip[1], ip[2], ip[3], g_self,
-                devices.knownCount(), g_master, g_master ? md.name : "-", g_masterPlaying,
-                cs.bpm, cs.locked, cs.running, cs.phaseErrUs / 1000.0f,
-                (unsigned long)g_droppedEvents);
+                devices.knownCount(), g_follow ? "deck" : "master", g_follow, g_master,
+                g_master ? md.name : "-", g_masterPlaying, cs.bpm, cs.locked, cs.running,
+                cs.held, cs.phaseErrUs / 1000.0f, (unsigned long)g_droppedEvents);
 #endif
 }
 
@@ -195,6 +229,7 @@ void setup() {
     TinyUSBDevice.attach();
   }
 #endif
+  for (auto& in : selectIn) in.begin();  // read in loop(); FOLLOW_DEVICE until then
   g_ready = true;  // core 1 may start consuming now
 
   Serial.begin(115200);
@@ -223,6 +258,7 @@ void setup() {
 
 void loop() {
   pumpNetwork();
+  serviceSelector(time_us_64());
 
   const uint32_t ms = millis();
   const int64_t now = int64_t(time_us_64());
@@ -258,39 +294,21 @@ void loop() {
 // ===================================================================== core 1
 static midiclock::ClockEngine engine;
 
-// GPIO pulse on core 1. Rising edge is written in the same loop iteration as
-// the MIDI clock byte it belongs to.
-class PulseOut {
- public:
-  explicit PulseOut(int pin) : pin_(pin) {}
-  void begin() {
-    if (pin_ < 0) return;
-    pinMode(pin_, OUTPUT);
-    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? LOW : HIGH);
-  }
-  void fire(uint64_t nowUs) {
-    if (pin_ < 0) return;
-    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? HIGH : LOW);
-    offAtUs_ = nowUs + uint64_t(PULSE_WIDTH_MS) * 1000;
-  }
-  void service(uint64_t nowUs) {
-    if (pin_ < 0 || !offAtUs_ || nowUs < offAtUs_) return;
-    digitalWrite(pin_, PULSE_ACTIVE_HIGH ? LOW : HIGH);
-    offAtUs_ = 0;
-  }
- private:
-  int pin_;
-  uint64_t offAtUs_ = 0;
-};
-
-static PulseOut barPulse(BAR_PULSE_PIN);
-static PulseOut beatPulse(BEAT_PULSE_PIN);
+static PulseOut clockOut(CLOCK_OUT_PIN);   // x24
+static GateOut  runOut(RUN_OUT_PIN);       // Run gate
+static PulseOut beatOut(BEAT_PULSE_PIN);   // x1
+static PulseOut barOut(BAR_PULSE_PIN);     // bar (on-board LED by default)
+static DebouncedIn resyncIn(RESYNC_IN_PIN, RESYNC_ACTIVE_LOW, INPUT_DEBOUNCE_MS * 1000u);
+static bool resyncLatched = false;
 
 void setup1() {
   while (!g_ready) tight_loop_contents();
   Serial1.begin(MIDI_DIN_BAUD);  // MIDI FeatherWing on TX/RX
-  barPulse.begin();
-  beatPulse.begin();
+  clockOut.begin();
+  runOut.begin();
+  beatOut.begin();
+  barOut.begin();
+  resyncIn.begin();
 
   midiclock::ClockConfig cfg;
   cfg.offsetUs = CLOCK_OFFSET_US;
@@ -301,6 +319,9 @@ void setup1() {
   cfg.sendTransport = CLOCK_SEND_TRANSPORT;
   cfg.startOnDownbeat = CLOCK_START_ON_DOWNBEAT;
   engine.configure(cfg);
+
+  // A switch/gate already active at power-up holds from the start.
+  if (RESYNC_MODE == 0 && resyncIn.active()) engine.setHold(true, int64_t(time_us_64()));
 }
 
 static void publishStatus() {
@@ -311,8 +332,21 @@ static void publishStatus() {
   g_status.locked = engine.locked();
   g_status.running = engine.running();
   g_status.ticking = engine.ticking();
+  g_status.held = engine.held();
   __dmb();
   g_status.seq = g_status.seq + 1;
+}
+
+static void serviceResync(uint64_t now) {
+  if (!resyncIn.update(now)) return;
+#if RESYNC_MODE == 0
+  engine.setHold(resyncIn.active(), int64_t(now));
+#else
+  if (resyncIn.active()) {
+    resyncLatched = !resyncLatched;
+    engine.setHold(resyncLatched, int64_t(now));
+  }
+#endif
 }
 
 void loop1() {
@@ -325,28 +359,40 @@ void loop1() {
     }
   }
 
+  const uint64_t now = time_us_64();
+  serviceResync(now);
+
   uint8_t out[4];
   uint8_t events = 0;
-  const uint64_t now = time_us_64();
   size_t n = engine.poll(int64_t(now), out, sizeof(out), &events);
-  if (n) {
-    Serial1.write(out, n);  // DIN first; real-time bytes leave immediately
-    if (events && (engine.locked() || PULSE_WHEN_UNLOCKED)) {
-      if (events & midiclock::kEventBar) barPulse.fire(now);
-      if (events & midiclock::kEventBeat) beatPulse.fire(now);
+
+  // Order matters: Run is updated before the clock edge so a DIN-sync style
+  // receiver sees Run high when the first clock after Start arrives.
+  runOut.set(engine.running());
+  if (events & midiclock::kEventTick) {
+    if (engine.running() || CLOCK_OUT_WHEN_STOPPED) {
+      uint32_t w = CLOCK_OUT_WIDTH_US ? CLOCK_OUT_WIDTH_US : uint32_t(engine.nominalTickUs() / 2);
+      clockOut.fire(now, w);
     }
+    if (engine.running() || PULSE_WHEN_STOPPED) {
+      if (events & midiclock::kEventBeat) beatOut.fire(now, BEAT_PULSE_WIDTH_MS * 1000u);
+      if (events & midiclock::kEventBar) barOut.fire(now, BAR_PULSE_WIDTH_MS * 1000u);
+    }
+  }
+  if (n) {
+    Serial1.write(out, n);  // real-time bytes go straight to the UART FIFO
 #if ENABLE_USB_MIDI
     for (size_t i = 0; i < n; ++i) queue_try_add(&g_usbBytes, &out[i]);
 #endif
   }
 
-  barPulse.service(now);
-  beatPulse.service(now);
+  clockOut.service(now);
+  beatOut.service(now);
+  barOut.service(now);
 
   static uint64_t nextPublish = 0;
-  uint64_t t = time_us_64();
-  if (t >= nextPublish) {
-    nextPublish = t + 100000;
+  if (now >= nextPublish) {
+    nextPublish = now + 100000;
     publishStatus();
   }
 }

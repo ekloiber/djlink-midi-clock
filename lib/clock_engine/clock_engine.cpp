@@ -86,19 +86,36 @@ void ClockEngine::onBeat(int64_t rxUs, double bpm, uint8_t beatInBar) {
   locked_ = true;
 }
 
+void ClockEngine::stopRunning() {
+  startArmed_ = false;
+  awaitRestart_ = false;
+  startPending_ = false;
+  if (running_ && cfg_.sendTransport) stopPending_ = true;
+  running_ = false;
+}
+
 void ClockEngine::onTransport(bool playing, int64_t nowUs) {
   (void)nowUs;
   if (playing == playing_) return;
   playing_ = playing;
-  if (!cfg_.sendTransport) return;
   if (playing) {
-    startArmed_ = true;
+    if (!hold_) startArmed_ = true;
   } else {
-    startArmed_ = false;
-    startPending_ = false;
-    if (running_) stopPending_ = true;
-    running_ = false;
+    stopRunning();
     if (!cfg_.runWhenStopped) ticking_ = false;
+  }
+}
+
+void ClockEngine::setHold(bool hold, int64_t nowUs) {
+  (void)nowUs;
+  if (hold == hold_) return;
+  hold_ = hold;
+  if (hold) {
+    stopRunning();  // Run low + MIDI Stop now; clocks muted from here on
+  } else if (playing_) {
+    // Stay silent until the restart on the next downbeat (or beat, per config).
+    startArmed_ = true;
+    awaitRestart_ = true;
   }
 }
 
@@ -117,18 +134,27 @@ size_t ClockEngine::poll(int64_t nowUs, uint8_t* out, size_t cap, uint8_t* event
   }
 
   if (ticking_ && double(nowUs) >= nextTickUs_ && n + 2 <= cap) {
+    uint8_t ev = 0;
     if (startPending_) {
-      out[n++] = kMidiStart;
+      if (cfg_.sendTransport) out[n++] = kMidiStart;
       startPending_ = false;
       running_ = true;
+      awaitRestart_ = false;
+      ev |= kEventStart;
     }
-    out[n++] = kMidiClock;
-    if (tick_ == 0) {
-      uint8_t ev = kEventBeat;
-      if (nextBar_ == 1) ev |= kEventBar;
-      if (nextBar_) nextBar_ = nextBar_ % kBeatsPerBar + 1;
-      if (events) *events = ev;
+    // While held (or released but waiting for the restart downbeat), keep the
+    // internal clock and bar count advancing so the PLL stays locked, but
+    // emit nothing.
+    if (!hold_ && !awaitRestart_) {
+      out[n++] = kMidiClock;
+      ev |= kEventTick;
+      if (tick_ == 0) {
+        ev |= kEventBeat;
+        if (nextBar_ == 1) ev |= kEventBar;
+      }
     }
+    if (tick_ == 0 && nextBar_) nextBar_ = nextBar_ % kBeatsPerBar + 1;
+    if (events) *events = ev;
     lastTickUs_ = nextTickUs_;
     haveTicked_ = true;
     tick_ = (tick_ + 1) % kPpqn;

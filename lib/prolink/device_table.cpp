@@ -78,7 +78,16 @@ bool DeviceTable::isPlaying(uint8_t device, int64_t nowUs) const {
   const auto& s = d_[device];
   if (!s.known) return false;
   if (s.lastStatusUs && nowUs - s.lastStatusUs < kStatusFreshUs && !s.isMixer) return s.playing;
-  return s.lastBeatUs && nowUs - s.lastBeatUs < kBeatFreshUs;
+  // No status (listen-only): infer play from beats. Treat 1.5 missed beat
+  // intervals as stopped, bounded to [300 ms, 2 s].
+  if (!s.lastBeatUs) return false;
+  int64_t window = kBeatFreshUs;
+  if (s.bpm > 0) {
+    window = int64_t(1.5 * 60e6 / s.bpm);
+    if (window < 300000) window = 300000;
+    if (window > kBeatFreshUs) window = kBeatFreshUs;
+  }
+  return nowUs - s.lastBeatUs < window;
 }
 
 uint8_t DeviceTable::pickFreeNumber(uint8_t lo, uint8_t hi) const {

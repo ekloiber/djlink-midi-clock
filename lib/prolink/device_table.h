@@ -49,7 +49,8 @@ class DeviceTable {
   uint8_t selectMaster(int64_t nowUs, uint8_t follow = 0) const;
 
   // Playing state: from fresh status if we have it, otherwise inferred from
-  // recent beat packets (players only send beats while playing).
+  // recent beat packets (players only send beats while playing): stopped
+  // after ~1.5 missed beats.
   bool isPlaying(uint8_t device, int64_t nowUs) const;
 
   // Lowest device number in [lo, hi] not currently seen on the network.

@@ -26,4 +26,5 @@ struct ClockStatus {
   uint8_t  locked;
   uint8_t  running;
   uint8_t  ticking;
+  uint8_t  held;
 };
