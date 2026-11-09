@@ -16,6 +16,9 @@
 #if ENABLE_USB_MIDI
 #include <Adafruit_TinyUSB.h>
 #endif
+#if STATUS_PIXEL_PIN >= 0
+#include <Adafruit_NeoPixel.h>
+#endif
 
 #include "clock_engine.h"
 #include "device_table.h"
@@ -23,6 +26,7 @@
 #include "io.h"
 #include "net.h"
 #include "prolink_packets.h"
+#include "status_led.h"
 
 // ---------------------------------------------------------------- shared state
 static queue_t g_events;          // core0 -> core1: ClockEvent
@@ -32,6 +36,9 @@ static queue_t g_usbBytes;        // core1 -> core0: MIDI bytes for USB
 static volatile bool g_ready = false;
 static ClockStatus g_status = {};
 static volatile uint32_t g_droppedEvents = 0;
+// Written only by core 1 (one 32-bit store each), read by core 0.
+static volatile uint32_t g_beatCount = 0;
+static volatile uint32_t g_barCount = 0;
 
 // ---------------------------------------------------------------- core 0 state
 static DjLinkNet net;
@@ -179,6 +186,70 @@ static void serviceSelector(uint64_t nowUs) {
   }
 }
 
+// ---- status NeoPixel (core 0) -------------------------------------------
+#if STATUS_PIXEL_PIN >= 0
+static Adafruit_NeoPixel pixel(1, STATUS_PIXEL_PIN, NEO_GRB + NEO_KHZ800);
+#endif
+static statusled::State g_ledState = statusled::State::kNoLink;
+
+static void pixelBegin() {
+#if STATUS_PIXEL_PIN >= 0
+  pixel.begin();
+  pixel.setBrightness(STATUS_PIXEL_BRIGHTNESS);
+  pixel.clear();
+  pixel.show();
+#endif
+}
+
+static void pixelShow(const statusled::Inputs& in, uint32_t ms) {
+#if STATUS_PIXEL_PIN >= 0
+  static statusled::Rgb last{1, 2, 3};
+  statusled::Rgb c = statusled::colour(in, ms);
+  if (c != last) {  // show() only on change
+    last = c;
+    pixel.setPixelColor(0, pixel.Color(c.r, c.g, c.b));
+    pixel.show();
+  }
+#else
+  (void)in;
+  (void)ms;
+#endif
+}
+
+static bool readStatus(ClockStatus& out);
+
+static void serviceStatusPixel(uint32_t ms) {
+  static uint32_t nextUpdate = 0, nextLinkCheck = 0;
+  static bool linkUp = false;
+  static uint32_t lastBeats = 0, lastBars = 0, beatAtMs = 0, barAtMs = 0;
+  static bool seenBeat = false, seenBar = false;
+
+  uint32_t beats = g_beatCount, bars = g_barCount;
+  if (beats != lastBeats) { lastBeats = beats; beatAtMs = ms; seenBeat = true; }
+  if (bars != lastBars) { lastBars = bars; barAtMs = ms; seenBar = true; }
+  if (int32_t(ms - nextUpdate) < 0) return;
+  nextUpdate = ms + 10;
+  if (int32_t(ms - nextLinkCheck) >= 0) {  // PHY register read over SPI
+    nextLinkCheck = ms + 250;
+    linkUp = net.linkUp();
+  }
+
+  ClockStatus cs{};
+  readStatus(cs);
+  statusled::Inputs in;
+  in.hardwareOk = true;
+  in.linkUp = linkUp;
+  in.devicesSeen = devices.knownCount();
+  in.sourcePlaying = g_masterPlaying;
+  in.held = cs.held;
+  in.running = cs.running;
+  in.locked = cs.locked;
+  in.msSinceBeat = seenBeat ? ms - beatAtMs : UINT32_MAX;
+  in.msSinceBar = seenBar ? ms - barAtMs : UINT32_MAX;
+  g_ledState = statusled::classify(in);
+  pixelShow(in, ms);
+}
+
 static bool readStatus(ClockStatus& out) {
   for (int tries = 0; tries < 4; ++tries) {
     uint32_t s1 = g_status.seq;
@@ -202,9 +273,9 @@ static void printStatus() {
   readStatus(cs);
   const auto& md = devices.get(g_master);
   IPAddress ip = net.localIP();
-  Serial.printf("[%s] ip=%u.%u.%u.%u self=%u devs=%d follow=%s%u src=%u(%s) play=%d | "
+  Serial.printf("[%s|%s] ip=%u.%u.%u.%u self=%u devs=%d follow=%s%u src=%u(%s) play=%d | "
                 "clock %.2f bpm lock=%d run=%d hold=%d err=%.2fms drop=%lu\n",
-                net.linkUp() ? "link" : "NO LINK", ip[0], ip[1], ip[2], ip[3], g_self,
+                net.linkUp() ? "link" : "NO LINK", statusled::name(g_ledState), ip[0], ip[1], ip[2], ip[3], g_self,
                 devices.knownCount(), g_follow ? "deck" : "master", g_follow, g_master,
                 g_master ? md.name : "-", g_masterPlaying, cs.bpm, cs.locked, cs.running,
                 cs.held, cs.phaseErrUs / 1000.0f, (unsigned long)g_droppedEvents);
@@ -233,22 +304,35 @@ void setup() {
   g_ready = true;  // core 1 may start consuming now
 
   Serial.begin(115200);
+  pixelBegin();
   makeMac(g_mac);
 
   if (!net.begin(g_mac)) {
     // No W5500 found. Report forever; core 1 keeps running.
+    statusled::Inputs bad;
+    bad.hardwareOk = false;
+    g_ledState = statusled::State::kNoHardware;
+    uint32_t nextMsg = 0;
     for (;;) {
-      Serial.println("ERROR: W5500 not found (check Ethernet FeatherWing / CS pin)");
+      uint32_t ms = millis();
+      pixelShow(bad, ms);
+      if (int32_t(ms - nextMsg) >= 0) {
+        nextMsg = ms + 1000;
+        Serial.println("ERROR: W5500 not found (check Ethernet FeatherWing / CS pin)");
 #if STATUS_LED_PIN >= 0
-      digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
+        digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
 #endif
-      delay(500);
+      }
+      delay(10);
     }
   }
 
   // Listen before claiming a device number so we don't collide.
   uint32_t until = millis() + DISCOVERY_WINDOW_MS;
-  while (int32_t(millis() - until) < 0) pumpNetwork();
+  while (int32_t(millis() - until) < 0) {
+    pumpNetwork();
+    serviceStatusPixel(millis());
+  }
 
   g_self = VCDJ_DEVICE_NUMBER ? VCDJ_DEVICE_NUMBER : devices.pickFreeNumber(VCDJ_MIN, VCDJ_MAX);
   if (!g_self) g_self = VCDJ_MAX;
@@ -275,6 +359,7 @@ void loop() {
     if (net.usingDhcp()) Ethernet.maintain();
     printStatus();
   }
+  serviceStatusPixel(ms);
 #if STATUS_LED_PIN >= 0
   if (g_ledOffAt && int32_t(ms - g_ledOffAt) >= 0) {
     digitalWrite(STATUS_LED_PIN, LOW);
@@ -369,6 +454,8 @@ void loop1() {
   // Order matters: Run is updated before the clock edge so a DIN-sync style
   // receiver sees Run high when the first clock after Start arrives.
   runOut.set(engine.running());
+  if (events & midiclock::kEventBeat) g_beatCount = g_beatCount + 1;  // status pixel
+  if (events & midiclock::kEventBar) g_barCount = g_barCount + 1;
   if (events & midiclock::kEventTick) {
     if (engine.running() || CLOCK_OUT_WHEN_STOPPED) {
       uint32_t w = CLOCK_OUT_WIDTH_US ? CLOCK_OUT_WIDTH_US : uint32_t(engine.nominalTickUs() / 2);

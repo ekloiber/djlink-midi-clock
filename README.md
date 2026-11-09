@@ -6,6 +6,8 @@ Standalone box that joins a Pioneer/AlphaTheta **Pro DJ Link** network (XDJ-XZ f
 - **Eurorack / DIN-sync GPIO:** x24 clock, Run gate, x1 beat trigger, and bar trigger (bar also on the on-board LED).
 - **Inputs:** a resync input (stop now, restart on the next bar) and a 5-position master/deck 1–4 selector.
 
+- **Status:** the on-board NeoPixel shows link, search, idle, armed, held and running states, with a flash on every beat and bar.
+
 Pin map, behaviour and interface notes: [docs/eurorack.md](docs/eurorack.md).
 
 > Status: **draft / pre-hardware.** The clock engine and protocol parser pass host tests; the firmware has not yet run on hardware. Work through [docs/bringup.md](docs/bringup.md) before relying on it.
@@ -18,6 +20,7 @@ Pin map, behaviour and interface notes: [docs/eurorack.md](docs/eurorack.md).
 | Adafruit Ethernet FeatherWing (W5500) | Pro DJ Link over wired Ethernet. CS on pin 10. |
 | Adafruit MIDI FeatherWing kit | 5-pin DIN out (and in, unused) on Serial1 TX/RX. |
 | On-board red LED (GPIO7 = header D13) | Bar trigger: blinks on beat 1 of every bar. |
+| On-board NeoPixel (GPIO21) | Status indicator (see below). |
 | Your panel | x24 / Run / x1 / Bar jacks (via 5 V buffers), resync jack + button, 5-position rotary switch. See [docs/eurorack.md](docs/eurorack.md). |
 
 Stack all three. The Ethernet wing uses SPI + D10; the MIDI wing uses TX/RX. No pin conflicts. Power via USB-C.
@@ -46,6 +49,21 @@ XDJ-XZ ──Ethernet──► W5500 ──SPI──► Core 0                  
   - x1 and Bar fire on beat and bar tick-0s. Bar position comes from the beat-in-bar field (1–4) in beat packets, so it depends on the track's rekordbox downbeat and assumes 4/4.
 - **Resync input:** Run goes low and all clocks stop. After release, outputs stay silent until the next bar downbeat, then everything restarts there.
 - **USB-MIDI** gets the same bytes via a queue drained on core 0, so USB can never delay DIN.
+
+## Status indicator (NeoPixel)
+
+| Colour | Meaning |
+|---|---|
+| Red, fast blink | W5500 / Ethernet FeatherWing not found |
+| Red, solid | No Ethernet link (cable / switch) |
+| Amber, slow blink | Link up, no DJ Link devices seen yet |
+| Blue, solid | Devices seen; followed deck stopped |
+| Cyan, fast blink | Deck playing; waiting for the downbeat to start (also after a resync release) |
+| Magenta, solid | Resync held |
+| Dim green + green flash per beat, white flash per bar | Running and locked |
+| Amber flash per beat | Running, but beats have stopped arriving (free-running at the last tempo) |
+
+Flashes follow the *output* beats and bars, not raw packets, so they show exactly what the x1/Bar jacks are doing. Brightness is set by `STATUS_PIXEL_BRIGHTNESS` (default 40/255). Set `STATUS_PIXEL_PIN=-1` to disable.
 
 ## Build
 
@@ -96,6 +114,7 @@ src/main.cpp                 core 0 + core 1 entry points
 src/net.{h,cpp}              W5500 + DJ Link sockets
 src/events.h                 inter-core messages
 src/io.h                     GPIO pulse/gate/debounce helpers + pin-map checks
+lib/status_led/              status indicator state/colour logic (portable)
 lib/prolink/                 packet parsing, keep-alive builder, device table (portable)
 lib/clock_engine/            PLL clock generator (portable)
 tests/host/                  host unit + simulation tests (ASan/UBSan)
@@ -109,7 +128,7 @@ docs/eurorack.md             GPIO pin map, behaviour, interface circuits, compar
 - Packet offsets for CDJ status, mixer status and keep-alive need confirming against an XDJ-XZ capture. See [docs/protocol.md](docs/protocol.md).
 - No Song Position Pointer. Bar alignment for MIDI gear relies on Start at the downbeat. The GPIO bar pulse gives an explicit bar marker.
 - GPIO is 3.3 V and not 5 V tolerant. Buffers and input protection are needed for Eurorack (guidance in docs/eurorack.md; no circuit designed yet).
-- No link/lock status indicator. The on-board NeoPixel (GPIO21) is the obvious candidate. HSTX or an I2C OLED on STEMMA QT could add a display.
+- No display. HSTX or an I2C OLED on STEMMA QT could add BPM / source readout.
 - No runtime config (web UI / SysEx). Everything is compile-time.
 - DIN MIDI-in on the FeatherWing is unused (could take a tap-tempo or external transport).
 

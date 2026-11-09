@@ -7,6 +7,10 @@ Do these in order. Each step isolates one layer.
 - [ ] `make -C tests/host` passes.
 - [ ] `pio run` builds both envs. The firmware has only been syntax-checked against stubs, so expect small API fixes. Likely spots are the TinyUSB setup and the `Ethernet.begin` overloads.
 
+## 0b. Status NeoPixel
+- [ ] At power-up with the Ethernet wing removed, the NeoPixel blinks red fast. With the wing fitted and no cable, it's solid red; with a cable to a switch but no players, it blinks amber.
+- [ ] If the NeoPixel stays dark, check whether the board gates NeoPixel power behind a pin (some Adafruit boards do; Adafruit's guide lists only the data pin, GPIO21, for this one). Also confirm the Adafruit NeoPixel library version supports RP2350.
+
 ## 1. SPI / W5500
 - [ ] Confirm that `SPI` in Arduino-Pico maps to the Feather's SCK/MO/MI header pins on this board. If it doesn't, set the pins with `SPI.setSCK/setTX/setRX` before `net.begin()`.
 - [ ] Serial shows an IP. A fast-blinking LED means no W5500 was found.

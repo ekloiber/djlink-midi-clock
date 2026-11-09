@@ -8,6 +8,7 @@
 #include "clock_engine.h"
 #include "device_table.h"
 #include "prolink_packets.h"
+#include "status_led.h"
 
 using namespace midiclock;
 
@@ -415,6 +416,43 @@ static void testListenOnlyStopInference() {
   CHECK(!t.isPlaying(1, 1000000 + 800000));  // > 1.5 beats at 120 BPM
 }
 
+
+// ------------------------------------------------------------ status LED tests
+static void testStatusLed() {
+  printf("status LED state priority and colours\n");
+  using namespace statusled;
+  Inputs in;
+  in.hardwareOk = false;
+  CHECK(classify(in) == State::kNoHardware);
+  CHECK(colour(in, 0) != colour(in, 130));  // blinking
+  in.hardwareOk = true;
+  CHECK(classify(in) == State::kNoLink);
+  CHECK((colour(in, 0) == Rgb{255, 0, 0}));
+  in.linkUp = true;
+  CHECK(classify(in) == State::kSearching);
+  in.devicesSeen = 2;
+  CHECK(classify(in) == State::kIdle);
+  in.sourcePlaying = true;
+  CHECK(classify(in) == State::kArmed);      // playing, waiting for downbeat
+  in.running = true;
+  in.locked = true;
+  CHECK(classify(in) == State::kRunning);
+  in.msSinceBeat = 10; in.msSinceBar = 10;
+  CHECK((colour(in, 0) == Rgb{255, 255, 255}));  // bar flash
+  in.msSinceBar = 500;
+  CHECK((colour(in, 0) == Rgb{0, 255, 0}));      // beat flash
+  in.msSinceBeat = 300;
+  CHECK((colour(in, 0) == Rgb{0, 40, 0}));       // dim between beats
+  in.locked = false;
+  CHECK(classify(in) == State::kFreewheel);
+  in.held = true;                                 // hold wins over running
+  CHECK(classify(in) == State::kHeld);
+  in.linkUp = false;                              // link loss wins over everything
+  CHECK(classify(in) == State::kNoLink);
+  in.linkUp = true; in.held = false; in.running = false; in.devicesSeen = 0;
+  CHECK(classify(in) == State::kSearching);
+}
+
 // ------------------------------------------------------------ protocol tests
 static void put16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
 static void put24(uint8_t* p, uint32_t v) { p[0] = v >> 16; p[1] = v >> 8; p[2] = v; }
@@ -527,6 +565,7 @@ int main() {
   testRunStateWithoutMidiTransport();
   testTickEvents();
   testListenOnlyStopInference();
+  testStatusLed();
   testParseBeat();
   testParseStatus();
   testKeepAliveRoundTrip();

@@ -92,6 +92,20 @@
 #define STATUS_LED_PIN -1
 #endif
 
+// Status indicator: on-board NeoPixel (GPIO21). -1 = off.
+//   red blink fast   W5500 not found          red solid    no Ethernet link
+//   amber blink      link up, no DJ Link gear blue solid   gear seen, source stopped
+//   cyan blink fast  playing, waiting for downbeat to start (also after resync release)
+//   magenta solid    resync held
+//   dim green        running; green flash each beat, white flash on bar downbeat
+//   amber flash      running but beats lost (free-running at last tempo)
+#ifndef STATUS_PIXEL_PIN
+#define STATUS_PIXEL_PIN 21
+#endif
+#ifndef STATUS_PIXEL_BRIGHTNESS
+#define STATUS_PIXEL_BRIGHTNESS 40   // 0-255; the NeoPixel is very bright at full scale
+#endif
+
 // ======================================================================
 // GPIO I/O. Values are Arduino-Pico pin numbers, which equal RP2350 GPIO
 // numbers. Feather RP2350 header labels -> GPIO:

@@ -11,10 +11,10 @@ namespace pincheck {
 constexpr int kUsed[] = {
     CLOCK_OUT_PIN,    RUN_OUT_PIN,      BEAT_PULSE_PIN,   BAR_PULSE_PIN,    STATUS_LED_PIN,
     RESYNC_IN_PIN,    SELECT_PIN_MASTER, SELECT_PIN_DECK1, SELECT_PIN_DECK2, SELECT_PIN_DECK3,
-    SELECT_PIN_DECK4,
+    SELECT_PIN_DECK4, STATUS_PIXEL_PIN,
 };
-// TX/RX (MIDI), PSRAM CS, Ethernet CS + SPI, NeoPixel.
-constexpr int kReserved[] = {0, 1, 8, ETH_CS_PIN, 20, 21, 22, 23};
+// TX/RX (MIDI), PSRAM CS, Ethernet CS + SPI.
+constexpr int kReserved[] = {0, 1, 8, ETH_CS_PIN, 20, 22, 23};
 
 constexpr bool noDuplicates() {
   for (size_t i = 0; i < sizeof(kUsed) / sizeof(kUsed[0]); ++i)
@@ -29,7 +29,7 @@ constexpr bool noReserved() {
   return true;
 }
 static_assert(noDuplicates(), "Two I/O functions are assigned the same pin (see config.h)");
-static_assert(noReserved(), "An I/O pin collides with MIDI, Ethernet, PSRAM or NeoPixel pins");
+static_assert(noReserved(), "An I/O pin collides with MIDI, Ethernet or PSRAM pins");
 
 }  // namespace pincheck
 

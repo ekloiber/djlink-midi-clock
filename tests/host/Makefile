@@ -1,11 +1,12 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined
 ROOT     := ../..
-INC      := -I$(ROOT)/lib/prolink -I$(ROOT)/lib/clock_engine
+INC      := -I$(ROOT)/lib/prolink -I$(ROOT)/lib/clock_engine -I$(ROOT)/lib/status_led
 SRC      := test_main.cpp \
             $(ROOT)/lib/prolink/prolink_packets.cpp \
             $(ROOT)/lib/prolink/device_table.cpp \
-            $(ROOT)/lib/clock_engine/clock_engine.cpp
+            $(ROOT)/lib/clock_engine/clock_engine.cpp \
+            $(ROOT)/lib/status_led/status_led.cpp
 
 test: run_tests
 	./run_tests

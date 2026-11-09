@@ -15,7 +15,7 @@
 | Selector: deck 3 | A3 | 29 | in | |
 | Selector: deck 4 | D24 | 24 | in | |
 
-**Taken:** TX/RX (MIDI), SCK/MO/MI + D10 (Ethernet), GPIO8 (PSRAM CS), GPIO21 (NeoPixel). The firmware fails to compile if a configured pin collides with any of these or with another function.
+**Taken:** TX/RX (MIDI), SCK/MO/MI + D10 (Ethernet), GPIO8 (PSRAM CS), GPIO21 (status NeoPixel). The firmware fails to compile if a configured pin collides with any of these or with another function.
 
 **Spare:** D25, SDA/SCL (keep these for a future OLED on STEMMA QT), and the HSTX connector GPIO12–19.
 
@@ -69,7 +69,8 @@ The RP2350 is 3.3 V and **not 5 V tolerant**. Eurorack signals can be 0–10 V, 
 | Supported gear | Lists CDJ/XDJ players; says all-in-ones (e.g. XDJ-AZ) unlikely to work | Targets XDJ-XZ (Beat Link supports it since 0.6.0); unverified on hardware |
 | Configurable | No | Compile-time |
 
+The Disco's Link LED is covered by the on-board NeoPixel status indicator (see README), which also shows held, armed and running states.
+
 Gaps relative to the Disco, worth considering:
-- **Link/status indicator.** The Disco's red Link LED flashes while searching and goes solid when connected. The on-board NeoPixel (GPIO21) could show no link / searching / locked / held for zero extra pins.
 - **Beat LED.** The Disco's green LED flashes every beat and stays solid while resync is latched. The x1 output could drive a panel LED through its buffer.
 - **Reset trigger.** The Run rising edge doubles as reset for most modules. If a module needs a separate short reset trigger, `kEventStart` is already available to drive one on a spare pin.
