@@ -109,11 +109,10 @@
 // ======================================================================
 // GPIO I/O. Values are Arduino-Pico pin numbers, which equal RP2350 GPIO
 // numbers. Feather RP2350 header labels -> GPIO:
-//   D5=5  D6=6  D9=9  D10=10(Ethernet CS)  D11=11  D13=7(red LED)
+//   D4=4  D5=5  D6=6  D9=9  D10=10(Ethernet CS)  D11=11  D13=7(red LED)
 //   D24=24  D25=25  A0=26  A1=27  A2=28  A3=29  SDA=2  SCL=3
 //   TX=0 RX=1 (MIDI)  SCK=22 MO=23 MI=20 (Ethernet)  GPIO8 = PSRAM CS
-// Avoid D4/D12 until their GPIO mapping is confirmed (Adafruit's guide lists
-// both as GPIO4). Set any pin to -1 to disable that function.
+// There is no D12 on this board. Set any pin to -1 to disable that function.
 // All levels are 3.3 V: see docs/eurorack.md for buffering/protection.
 // ======================================================================
 

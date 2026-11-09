@@ -17,9 +17,7 @@
 
 **Taken:** TX/RX (MIDI), SCK/MO/MI + D10 (Ethernet), GPIO8 (PSRAM CS), GPIO21 (status NeoPixel). The firmware fails to compile if a configured pin collides with any of these or with another function.
 
-**Spare:** D25, SDA/SCL (keep these for a future OLED on STEMMA QT), and the HSTX connector GPIO12–19.
-
-**Avoid D4/D12** until their mapping is confirmed. Adafruit's guide lists both as GPIO4.
+**Spare:** D4 (GPIO4), D25, SDA/SCL (keep these for a future OLED on STEMMA QT), and the HSTX connector GPIO12–19. The board has no D12.
 
 ## Behaviour
 
